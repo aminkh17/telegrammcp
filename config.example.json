@@ -1,0 +1,11 @@
+{
+  "apiId": 0,
+  "apiHash": "",
+  "allowedChats": [],
+  "allowChatDiscovery": true,
+  "defaultMessageLimit": 30,
+  "maxMessageLimit": 100,
+  "tearOffMessageTextAt": 4000,
+  "daemonIdleTimeoutSeconds": 600,
+  "verbosityLevel": 1
+}

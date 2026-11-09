@@ -1,0 +1,51 @@
+{
+  "name": "telegram-readonly-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for Telegram using TDLib, restricted to an allowlist of chats",
+  "type": "module",
+  "bin": {
+    "telegram-readonly-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "daemon": "node dist/daemon.js",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "telegram",
+    "mcp",
+    "model-context-protocol",
+    "tdlib",
+    "read-only"
+  ],
+  "license": "MIT",
+  "author": "aminkh17",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aminkh17/telegrammcp.git"
+  },
+  "homepage": "https://github.com/aminkh17/telegrammcp#readme",
+  "bugs": {
+    "url": "https://github.com/aminkh17/telegrammcp/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "prebuilt-tdlib": "^0.1008069.0",
+    "tdl": "^8.1.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
