@@ -39,7 +39,7 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "prebuilt-tdlib": "^0.1008069.0",
     "tdl": "^8.1.0",
-    "zod": "^3.25.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
