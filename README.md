@@ -1,11 +1,14 @@
-# Telegram Read-Only MCP
+# Telegram MCP
 
 A local [Model Context Protocol](https://modelcontextprotocol.io) server that connects to your
-personal Telegram account through **TDLib**, Telegram's official client library, and exposes
-**read-only** access limited to an explicit allowlist of chats.
+personal Telegram account through **TDLib**, Telegram's official client library. It is
+**read-only by default**, limited to an explicit allowlist of chats, with optional
+**approval-gated sending**.
 
-- No send, edit, delete, forward, join, leave, or reaction operations exist in the server.
-- Every read tool resolves its target and rejects anything outside the allowlist.
+- Every tool resolves its target and rejects anything outside the allowlist.
+- Sending is off unless enabled, and every message requires your explicit approval in an
+  approval prompt. The AI agent cannot approve on your behalf.
+- No edit, delete, forward, join, leave, or reaction operations exist in the server.
 - The Telegram session, database, and config stay on your machine and are gitignored.
 - One shared daemon owns TDLib, so any number of MCP client sessions can use it at once.
 
@@ -100,6 +103,33 @@ Use the built entry point as a stdio server:
 | `get_messages` | Read history, oldest first, with pagination |
 | `search_messages` | Search text in one or all allowlisted chats |
 | `get_message` | Fetch one message by id |
+| `send_message` | Send a text message to an allowlisted chat, only after user approval |
+
+## Sending messages (approval required)
+
+Sending is disabled by default. To enable it, set this in `config.json`:
+
+```json
+{
+  "allowSending": true
+}
+```
+
+Every `send_message` call then works like this:
+
+1. The server checks that sending is enabled and that the chat is allowlisted, and stores the
+   exact message as a short-lived draft.
+2. The server asks **you** to approve it through an MCP approval prompt
+   ([form elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation)).
+   The prompt shows the target chat, any reply target, and the full text.
+3. Only if you turn on **Send this message** and submit is that exact draft sent. Declining,
+   cancelling, or ignoring the prompt for 10 minutes sends nothing.
+
+The approval prompt comes from the server, not from the AI, so the agent cannot approve its own
+messages. If your MCP client does not support approval prompts, sending is refused.
+
+Messages are plain text, up to 4096 characters, and can optionally reply to a message in the same
+chat or be sent silently. Sending uses the same allowlist as reading.
 
 ## Allowlist
 
@@ -136,6 +166,7 @@ Discovery never returns message contents.
 | `apiId`, `apiHash` | unset | Telegram API credentials from my.telegram.org |
 | `allowedChats` | `[]` | Chats that may be read |
 | `allowChatDiscovery` | `true` | Enable `discover_chats` metadata listing |
+| `allowSending` | `false` | Enable `send_message` (each message still needs approval) |
 | `defaultMessageLimit` | `30` | Default page size |
 | `maxMessageLimit` | `100` | Upper bound for `limit` parameters |
 | `tearOffMessageTextAt` | `4000` | Max characters per message text |
@@ -177,8 +208,9 @@ pkill -f 'telegrammcp/dist/daemon.js'
 
 ## Security model
 
-- Read-only by construction: the server only invokes TDLib `get*`, `search*`, and auth methods.
-- The allowlist is enforced before any history or search call.
+- Reads only use TDLib `get*` and `search*` methods. The only write is `sendMessage`.
+- The allowlist is enforced before any history, search, or send call.
+- Sending requires `allowSending: true` plus explicit user approval of each exact message.
 - Chat discovery is metadata-only and can be disabled.
 - All logs go to stderr; stdout is reserved for MCP JSON-RPC.
 - Daemon RPC uses a Unix socket with mode `0600`, so only your user can connect.
@@ -187,11 +219,18 @@ pkill -f 'telegrammcp/dist/daemon.js'
 The MCP client (your AI agent) can read messages from allowlisted chats. That is the intended
 trust boundary. Do not allowlist chats you do not want an agent to read.
 
+Approval is enforced on the MCP tool path. Any program running as your user, including an agent
+with unrestricted shell access, could still use your local Telegram session directly. If that
+matters, restrict shell access with your MCP client's permission settings.
+
 ## Troubleshooting
 
 - **"Telegram API credentials are not configured"** — set `apiId` and `apiHash` in `config.json`.
 - **Daemon problems** — check `data/daemon.log`; delete a stale `data/daemon.sock` if no daemon is running.
 - **Signed out** — call `auth_status`, then `auth_start` to log in again.
+- **"Sending is disabled"** — set `"allowSending": true` in `config.json`.
+- **"This MCP client does not support approval prompts"** — use a client that supports MCP form
+  elicitation; sending is refused otherwise.
 - **Reboots** — nothing to do. The daemon starts again on the next tool call.
 
 ## Limitations

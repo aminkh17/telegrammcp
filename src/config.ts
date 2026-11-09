@@ -19,6 +19,8 @@ const configSchema = z.object({
   allowedChats: z.array(z.string().min(1)).default([]),
   /** Allow the discovery tool to list chats (metadata only) so the allowlist can be populated. */
   allowChatDiscovery: z.boolean().default(true),
+  /** Allow the send_message tool. Every message still requires explicit user approval. */
+  allowSending: z.boolean().default(false),
   defaultMessageLimit: z.number().int().min(1).max(100).default(30),
   maxMessageLimit: z.number().int().min(1).max(100).default(100),
   tearOffMessageTextAt: z.number().int().min(200).max(100_000).default(4000),

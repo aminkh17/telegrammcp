@@ -1,9 +1,17 @@
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import { ChatAccess, discoverChats } from './chats.js'
 import { defaultConfig, getPaths, loadConfig, type Config, type Paths } from './config.js'
 import { log } from './log.js'
-import { getMessage, getMessages, searchMessages } from './messages.js'
+import {
+  getMessage,
+  getMessages,
+  MAX_MESSAGE_LENGTH,
+  MessageFormatter,
+  searchMessages,
+  sendTextMessage,
+} from './messages.js'
 import { daemonSocketPath } from './rpc.js'
 import { TelegramClient } from './tdlib.js'
 
@@ -14,9 +22,19 @@ type RuntimeState = {
   access: ChatAccess
 }
 
+/** A message waiting for user approval. Only an approved draft can be sent. */
+type SendDraft = {
+  chatId: number
+  text: string
+  replyToMessageId?: number
+  disableNotification: boolean
+  expiresAt: number
+}
+
 const STARTUP_HEALTH_PROBE_MS = 800
 const SHUTDOWN_GRACE_MS = 5_000
 const MAX_REQUEST_BYTES = 1_048_576
+const DRAFT_TTL_MS = 15 * 60_000
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -37,6 +55,7 @@ let reloadPromise: Promise<void> | null = null
 let idleTimer: NodeJS.Timeout | null = null
 let inFlight = 0
 let shuttingDown = false
+const drafts = new Map<string, SendDraft>()
 
 // ------------------------------------------------------------------ config
 
@@ -169,6 +188,52 @@ function clampLimit(config: Config, requested: number | undefined, fallback?: nu
   return Math.min(Math.max(1, Math.floor(value)), config.maxMessageLimit)
 }
 
+function optionalBoolean(params: Record<string, unknown>, name: string): boolean | undefined {
+  const value = params[name]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'boolean') throw new Error(`Parameter "${name}" must be a boolean.`)
+  return value
+}
+
+function requiredMessageText(params: Record<string, unknown>): string {
+  const text = params.text
+  if (typeof text !== 'string' || text.trim() === '') {
+    throw new Error('Parameter "text" must be a non-empty string.')
+  }
+  if (text.length > MAX_MESSAGE_LENGTH) {
+    throw new Error(`Message is ${text.length} characters; Telegram allows at most ${MAX_MESSAGE_LENGTH}.`)
+  }
+  return text
+}
+
+function requireSendingEnabled(config: Config): void {
+  if (!config.allowSending) {
+    throw new Error('Sending is disabled. Set "allowSending": true in config.json to enable send_message.')
+  }
+}
+
+function pruneDrafts(): void {
+  const now = Date.now()
+  for (const [id, draft] of drafts) {
+    if (draft.expiresAt <= now) drafts.delete(id)
+  }
+}
+
+function hasPendingDrafts(): boolean {
+  pruneDrafts()
+  return drafts.size > 0
+}
+
+function takeDraft(draftId: string): SendDraft {
+  pruneDrafts()
+  const draft = drafts.get(draftId)
+  drafts.delete(draftId)
+  if (!draft) {
+    throw new Error('This message draft expired or was already used. Nothing was sent; prepare it again.')
+  }
+  return draft
+}
+
 // ------------------------------------------------------------------ dispatch
 
 async function dispatch(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -250,6 +315,59 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
         config.tearOffMessageTextAt,
       )
 
+    // Sending is split into prepare -> user approval (in the MCP server) -> send,
+    // so the exact chat and text the user approved are what gets sent.
+    case 'prepare_send': {
+      requireSendingEnabled(config)
+      const text = requiredMessageText(params)
+      const replyToMessageId = optionalNumber(params, 'replyToMessageId', { integer: true, min: 1 })
+      const disableNotification = optionalBoolean(params, 'disableNotification') ?? false
+      const allowed = await access.resolve(requiredString(params, 'chat'))
+
+      let replyTo: { id: number; preview: string; sender?: string } | undefined
+      if (replyToMessageId) {
+        const original = await getMessage(tg, access, String(allowed.chatId), replyToMessageId, 300)
+        replyTo = {
+          id: replyToMessageId,
+          preview: original.message.text ?? `[${original.message.type}]`,
+          sender: original.message.sender?.name,
+        }
+      }
+
+      pruneDrafts()
+      const draftId = randomUUID()
+      drafts.set(draftId, {
+        chatId: allowed.chatId,
+        text,
+        replyToMessageId,
+        disableNotification,
+        expiresAt: Date.now() + DRAFT_TTL_MS,
+      })
+
+      return { draftId, chat: allowed.summary, text, replyTo, disableNotification }
+    }
+
+    case 'send_message': {
+      requireSendingEnabled(config)
+      const draft = takeDraft(requiredString(params, 'draftId'))
+
+      // Re-check the allowlist in case config.json changed while awaiting approval.
+      await access.ensureLoaded()
+      if (!access.isAllowed(draft.chatId)) {
+        throw new Error('The target chat is no longer in the allowlist. The message was not sent.')
+      }
+
+      const client = await tg.requireAuthorized()
+      const allowed = await access.resolve(String(draft.chatId))
+      const sent = await sendTextMessage(client, draft)
+      const formatter = new MessageFormatter(client, config.tearOffMessageTextAt)
+      log.info(`Sent approved message ${sent.id} to chat ${draft.chatId}`)
+      return { sent: true, chat: allowed.summary, message: await formatter.format(sent, allowed.summary) }
+    }
+
+    case 'discard_draft':
+      return { discarded: drafts.delete(requiredString(params, 'draftId')) }
+
     default:
       throw new Error(`Unknown daemon method "${method}".`)
   }
@@ -267,7 +385,8 @@ function armIdleTimer(): void {
   const timeoutMs = state.config.daemonIdleTimeoutSeconds * 1000
   idleTimer = setTimeout(() => {
     idleTimer = null
-    if (inFlight > 0) {
+    // Stay alive while a request runs or a draft awaits user approval.
+    if (inFlight > 0 || hasPendingDrafts()) {
       armIdleTimer()
       return
     }

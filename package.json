@@ -1,7 +1,7 @@
 {
   "name": "telegram-readonly-mcp",
   "version": "0.1.0",
-  "description": "Read-only MCP server for Telegram using TDLib, restricted to an allowlist of chats",
+  "description": "Telegram MCP server using TDLib: read allowlisted chats, send only with explicit user approval",
   "type": "module",
   "bin": {
     "telegram-readonly-mcp": "dist/index.js"

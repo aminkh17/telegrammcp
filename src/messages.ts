@@ -6,6 +6,7 @@ import type {
   MessageContent,
   MessageOrigin,
   MessageSender,
+  Update,
   User,
 } from 'tdlib-types'
 import type { AllowedChat, ChatAccess, ChatSummary } from './chats.js'
@@ -445,5 +446,89 @@ export async function getMessage(
     throw new Error(
       `Could not get message ${messageId} from "${allowed.summary.title}": ${tdErrorMessage(error)}`,
     )
+  }
+}
+
+/** Telegram's limit for a single text message. */
+export const MAX_MESSAGE_LENGTH = 4096
+
+const SEND_CONFIRM_TIMEOUT_MS = 30_000
+
+type SendOutcome = { ok: true; message: Message } | { ok: false; error: string }
+
+export type SendTextOptions = {
+  chatId: number
+  text: string
+  replyToMessageId?: number
+  disableNotification?: boolean
+}
+
+/**
+ * Send a plain-text message and wait until Telegram confirms or rejects it,
+ * so callers never report success for a message that failed to send.
+ */
+export async function sendTextMessage(client: Client, options: SendTextOptions): Promise<Message> {
+  const outcomes = new Map<number, SendOutcome>()
+  let waiting: { id: number; resolve: (outcome: SendOutcome) => void } | null = null
+
+  const listener = (update: Update): void => {
+    if (update._ !== 'updateMessageSendSucceeded' && update._ !== 'updateMessageSendFailed') return
+    if (update.message.chat_id !== options.chatId) return
+    const outcome: SendOutcome =
+      update._ === 'updateMessageSendSucceeded'
+        ? { ok: true, message: update.message }
+        : { ok: false, error: `${update.error.message} (code ${update.error.code})` }
+    if (waiting?.id === update.old_message_id) waiting.resolve(outcome)
+    else outcomes.set(update.old_message_id, outcome)
+  }
+
+  client.on('update', listener)
+  try {
+    let pending: Message
+    try {
+      pending = await client.invoke({
+        _: 'sendMessage',
+        chat_id: options.chatId,
+        reply_to: options.replyToMessageId
+          ? { _: 'inputMessageReplyToMessage', message_id: options.replyToMessageId }
+          : undefined,
+        options: options.disableNotification
+          ? { _: 'messageSendOptions', disable_notification: true }
+          : undefined,
+        input_message_content: {
+          _: 'inputMessageText',
+          text: { _: 'formattedText', text: options.text, entities: [] },
+          clear_draft: false,
+        },
+      })
+    } catch (error) {
+      throw new Error(`Telegram refused to send the message: ${tdErrorMessage(error)}`)
+    }
+
+    if (!pending.sending_state) return pending
+
+    const outcome =
+      outcomes.get(pending.id) ??
+      (await new Promise<SendOutcome | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), SEND_CONFIRM_TIMEOUT_MS)
+        waiting = {
+          id: pending.id,
+          resolve: (result) => {
+            clearTimeout(timer)
+            resolve(result)
+          },
+        }
+      }))
+
+    if (!outcome) {
+      throw new Error(
+        'Telegram has not confirmed the message yet. It is queued and may still be delivered, ' +
+          'so check the chat before sending it again.',
+      )
+    }
+    if (!outcome.ok) throw new Error(`Telegram failed to send the message: ${outcome.error}`)
+    return outcome.message
+  } finally {
+    client.off('update', listener)
   }
 }

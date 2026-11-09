@@ -272,7 +272,7 @@ export class ChatAccess {
         ? ` Unresolved entries: ${this.allowlistErrors.map((item) => `"${item.entry}" (${item.error})`).join('; ')}.`
         : ''
       throw new Error(
-        `No chats are allowlisted. Add @username, numeric id, or exact title entries to allowedChats in config.json, then restart the MCP server.${details}`,
+        `No chats are allowlisted. Add @username, numeric id, or exact title entries to allowedChats in config.json; changes apply on the next call.${details}`,
       )
     }
 

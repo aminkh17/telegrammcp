@@ -3,6 +3,7 @@
   "apiHash": "",
   "allowedChats": [],
   "allowChatDiscovery": true,
+  "allowSending": false,
   "defaultMessageLimit": 30,
   "maxMessageLimit": 100,
   "tearOffMessageTextAt": 4000,

@@ -37,14 +37,83 @@ function call<T>(method: string, params: Record<string, unknown> = {}): Promise<
   return callDaemon<T>(method, params)
 }
 
+const APPROVAL_TIMEOUT_MS = 10 * 60_000
+
+type SendDraft = {
+  draftId: string
+  chat: { id: number; title: string; kind: string; username?: string }
+  text: string
+  replyTo?: { id: number; preview: string; sender?: string }
+  disableNotification: boolean
+}
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`
+}
+
+function approvalMessage(draft: SendDraft): string {
+  const username = draft.chat.username ? ` (@${draft.chat.username})` : ''
+  const lines = [
+    'An AI agent wants to send a Telegram message from your account.',
+    '',
+    `To: ${draft.chat.title}${username} — ${draft.chat.kind}, id ${draft.chat.id}`,
+  ]
+  if (draft.replyTo) {
+    const from = draft.replyTo.sender ? ` from ${draft.replyTo.sender}` : ''
+    lines.push(`Reply to: message ${draft.replyTo.id}${from}: "${clip(draft.replyTo.preview, 200)}"`)
+  }
+  if (draft.disableNotification) lines.push('Notification: silent')
+  lines.push('', 'Message:', draft.text, '', 'Turn on "Send this message" and submit to send it. Decline or cancel to block it.')
+  return lines.join('\n')
+}
+
+/**
+ * Ask the human user, through the MCP client, to approve one exact message.
+ * The agent cannot answer this prompt itself; clients without approval
+ * prompts cannot send at all.
+ */
+async function requestApproval(server: McpServer, draft: SendDraft): Promise<boolean> {
+  if (!server.server.getClientCapabilities()?.elicitation?.form) {
+    throw new Error(
+      'Sending requires user approval, but this MCP client does not support approval prompts ' +
+        '(MCP form elicitation). The message was not sent.',
+    )
+  }
+
+  const result = await server.server.elicitInput(
+    {
+      mode: 'form',
+      message: approvalMessage(draft),
+      requestedSchema: {
+        type: 'object',
+        properties: {
+          approve: {
+            type: 'boolean',
+            title: 'Send this message',
+            description: 'Turn on to send exactly the message shown above.',
+            default: false,
+          },
+        },
+        required: ['approve'],
+      },
+    },
+    { timeout: APPROVAL_TIMEOUT_MS },
+  )
+
+  return result.action === 'accept' && result.content?.approve === true
+}
+
 async function main(): Promise<void> {
   const server = new McpServer(
     { name: 'telegram-readonly', version: '0.1.0' },
     {
       instructions:
-        'Read-only Telegram access restricted to an allowlist of chats. ' +
+        'Telegram access restricted to an allowlist of chats. ' +
         'If not signed in, call auth_status, then auth_start/auth_code/auth_password. ' +
-        'Only read tools are provided; sending, editing, deleting, joining, and leaving are impossible.',
+        'Reading is always available for allowlisted chats. send_message is the only write operation: ' +
+        'it is disabled unless enabled in config, and every message shows the user an approval prompt. ' +
+        'Nothing is sent unless the user approves; if they decline, do not retry unless they ask. ' +
+        'Editing, deleting, forwarding, joining, and leaving are impossible.',
     },
   )
 
@@ -223,6 +292,65 @@ async function main(): Promise<void> {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ chat, messageId }) => run(() => call('get_message', { chat, messageId })),
+  )
+
+  // ---------------------------------------------------------------- sending
+
+  server.registerTool(
+    'send_message',
+    {
+      title: 'Send message (requires user approval)',
+      description:
+        'Send a plain-text message to one allowlisted chat as the signed-in user. ' +
+        'Requires allowSending in config.json. Every call shows the user an approval prompt with the exact ' +
+        'chat and text; nothing is sent unless the user approves. Returns sent: false if the user declines. ' +
+        'Do not retry a declined message unless the user asks.',
+      inputSchema: {
+        chat: z.string().min(1).describe('Allowlisted chat: @username, t.me link, numeric id, or exact title.'),
+        text: z.string().min(1).max(4096).describe('Plain-text message to send (max 4096 characters).'),
+        replyToMessageId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Optional message id in the same chat to reply to.'),
+        disableNotification: z
+          .boolean()
+          .optional()
+          .describe('Send silently, without a notification for recipients.'),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ chat, text, replyToMessageId, disableNotification }) =>
+      run(async () => {
+        const draft = await call<SendDraft>('prepare_send', {
+          chat,
+          text,
+          replyToMessageId,
+          disableNotification,
+        })
+
+        let approved = false
+        try {
+          approved = await requestApproval(server, draft)
+        } finally {
+          if (!approved) await call('discard_draft', { draftId: draft.draftId }).catch(() => undefined)
+        }
+
+        if (!approved) {
+          return {
+            sent: false,
+            status: 'not_approved',
+            message: 'The user did not approve this message, so it was not sent. Do not retry unless the user asks.',
+          }
+        }
+        return call('send_message', { draftId: draft.draftId })
+      }),
   )
 
   let shuttingDown = false
